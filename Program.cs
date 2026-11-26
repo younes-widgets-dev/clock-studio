@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
 using System.Drawing.Text;
 using System.Globalization;
 using System.IO;
@@ -79,6 +80,48 @@ namespace ClockStudio
         }
         [DllImport("kernel32.dll")] public static extern bool GetSystemTimes(out long idle, out long kernel, out long user);
         public const int WS_EX_TOOLWINDOW = 0x80;
+        [StructLayout(LayoutKind.Sequential)] struct PT { public int x, y; }
+        [StructLayout(LayoutKind.Sequential)] struct SZ { public int cx, cy; }
+        [StructLayout(LayoutKind.Sequential, Pack = 1)] struct BLEND { public byte Op, Flags, Alpha, Fmt; }
+        [StructLayout(LayoutKind.Sequential)] struct BB { public int Flags; public int Enable; public IntPtr Rgn; public int Trans; }
+        [DllImport("user32.dll", SetLastError = true)] static extern bool UpdateLayeredWindow(IntPtr hwnd, IntPtr hdcDst, ref PT pptDst, ref SZ psize, IntPtr hdcSrc, ref PT pptSrc, int crKey, ref BLEND pblend, int dwFlags);
+        [DllImport("user32.dll")] static extern IntPtr GetDC(IntPtr h);
+        [DllImport("user32.dll")] static extern int ReleaseDC(IntPtr h, IntPtr dc);
+        [DllImport("gdi32.dll")] static extern IntPtr CreateCompatibleDC(IntPtr dc);
+        [DllImport("gdi32.dll")] static extern IntPtr SelectObject(IntPtr dc, IntPtr o);
+        [DllImport("gdi32.dll")] static extern bool DeleteObject(IntPtr o);
+        [DllImport("gdi32.dll")] static extern bool DeleteDC(IntPtr dc);
+        [DllImport("dwmapi.dll")] static extern int DwmEnableBlurBehindWindow(IntPtr h, ref BB bb);
+        public static void Present(Form f, Bitmap bmp, byte alpha)
+        {
+            IntPtr scr = GetDC(IntPtr.Zero), mem = CreateCompatibleDC(scr), hb = IntPtr.Zero, old = IntPtr.Zero;
+            try
+            {
+                hb = bmp.GetHbitmap(Color.FromArgb(0)); old = SelectObject(mem, hb);
+                PT dst = new PT(); dst.x = f.Left; dst.y = f.Top; SZ size = new SZ(); size.cx = bmp.Width; size.cy = bmp.Height; PT src = new PT();
+                BLEND bl = new BLEND(); bl.Op = 0; bl.Flags = 0; bl.Alpha = alpha; bl.Fmt = 1;
+                UpdateLayeredWindow(f.Handle, scr, ref dst, ref size, mem, ref src, 0, ref bl, 2);
+            }
+            finally
+            {
+                if (old != IntPtr.Zero) SelectObject(mem, old);
+                if (hb != IntPtr.Zero) DeleteObject(hb);
+                DeleteDC(mem); ReleaseDC(IntPtr.Zero, scr);
+            }
+        }
+        public static void Blur(Form f, bool on, GraphicsPath shape)
+        {
+            try
+            {
+                BB bb = new BB(); IntPtr hr = IntPtr.Zero; Region rg = null;
+                if (on) { rg = new Region(shape); using (Graphics g = Graphics.FromHwnd(f.Handle)) hr = rg.GetHrgn(g); bb.Flags = 3; bb.Enable = 1; bb.Rgn = hr; }
+                else { bb.Flags = 1; bb.Enable = 0; }
+                DwmEnableBlurBehindWindow(f.Handle, ref bb);
+                if (hr != IntPtr.Zero) DeleteObject(hr);
+                if (rg != null) rg.Dispose();
+            }
+            catch { }
+        }
         [DllImport("user32.dll", EntryPoint = "GetWindowLong")] public static extern int GetWindowLong(IntPtr h, int i);
         [DllImport("user32.dll", EntryPoint = "SetWindowLong")] public static extern int SetWindowLong(IntPtr h, int i, int v);
         [DllImport("kernel32.dll")] public static extern ulong GetTickCount64();
@@ -434,7 +477,7 @@ namespace ClockStudio
 
         protected override CreateParams CreateParams
         {
-            get { CreateParams cp = base.CreateParams; cp.ExStyle |= Native.WS_EX_TOOLWINDOW; if (B("through")) cp.ExStyle |= 0x20 | 0x80000; return cp; }
+            get { CreateParams cp = base.CreateParams; cp.ExStyle |= Native.WS_EX_TOOLWINDOW | 0x80000; if (B("through")) cp.ExStyle |= 0x20; return cp; }
         }
         protected override bool ShowWithoutActivation { get { return true; } }
         public void Init() { BuildMenu(); Restyle(); }
@@ -445,14 +488,12 @@ namespace ClockStudio
             SaveAll();
             ClientSize = new Size(Math.Max(60, I("w")), Math.Max(40, I("h")));
             Location = new Point(I("x"), I("y"));
-            using (GraphicsPath p = Shapes.Make(I("shape"), I("radius"), new RectangleF(0, 0, Width, Height))) Region = new Region(p);
             bool glass = I("bgmode") > 0;
             BackColor = glass ? Color.Black : C("bg");
             TopMost = B("top");
-            Opacity = glass ? 1.0 : Math.Max(0.15, Math.Min(1.0, I("opacity") / 100.0));
             if (IsHandleCreated)
             {
-                ApplyAccent();
+                UpdateBlur();
                 try
                 {
                     int ex = Native.GetWindowLong(Handle, -20);
@@ -466,13 +507,12 @@ namespace ClockStudio
             tick.Interval = rate; tick.Start();
             Invalidate();
         }
-        void ApplyAccent()
+        public void UpdateBlur()
         {
-            int m = I("bgmode");
-            if (m == 0) Native.SetAccent(Handle, 0, Color.Black);
-            else Native.SetAccent(Handle, m == 1 ? 2 : (m == 2 ? 3 : 4), Color.FromArgb(I("bgalpha"), C("bg")));
+            if (!IsHandleCreated) return; int m = I("bgmode");
+            using (GraphicsPath p = Shapes.Make(I("shape"), I("radius"), new RectangleF(0, 0, Width, Height))) Native.Blur(this, m >= 2 && !B("bgoff"), p);
         }
-        protected override void OnHandleCreated(EventArgs e) { base.OnHandleCreated(e); ApplyAccent(); }
+        protected override void OnHandleCreated(EventArgs e) { base.OnHandleCreated(e); UpdateBlur(); }
 
         // ---- mouse ----
         int HitEdge(Point p)
@@ -511,8 +551,7 @@ namespace ClockStudio
                     if (nh < 40) { if ((edge & 4) != 0) ny -= 40 - nh; nh = 40; }
                     v["w"] = nw.ToString(); v["h"] = nh.ToString(); v["x"] = nx.ToString(); v["y"] = ny.ToString();
                     Location = new Point(nx, ny); ClientSize = new Size(nw, nh);
-                    using (GraphicsPath p = Shapes.Make(I("shape"), I("radius"), new RectangleF(0, 0, Width, Height))) Region = new Region(p);
-                    Invalidate();
+                    UpdateBlur(); Invalidate();
                 }
                 else if (dragging && moved) Location = new Point(formStart.X + dx, formStart.Y + dy);
             }
@@ -525,7 +564,8 @@ namespace ClockStudio
             dragging = false; edge = 0;
             base.OnMouseUp(e);
         }
-        protected override void OnShown(EventArgs e) { base.OnShown(e); SendBack(); }
+        protected override void OnShown(EventArgs e) { base.OnShown(e); SendBack(); UpdateBlur(); Invalidate(); }
+        public new void Invalidate() { Render(); }
         protected override void OnActivated(EventArgs e) { base.OnActivated(e); SendBack(); }
         void SendBack() { if (!B("top")) Native.SetWindowPos(Handle, Native.HWND_BOTTOM, 0, 0, 0, 0, Native.SWP_NOMOVE | Native.SWP_NOSIZE | Native.SWP_NOACTIVATE); }
 
@@ -576,25 +616,42 @@ namespace ClockStudio
         }
 
         // ================= Painting =================
-        protected override void OnPaint(PaintEventArgs e)
+        protected override void OnPaint(PaintEventArgs e) { Render(); }
+        void Render()
         {
-            Graphics g = e.Graphics;
-            g.SmoothingMode = SmoothingMode.AntiAlias; g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
+            if (!IsHandleCreated || !Visible || Width < 2 || Height < 2) return;
             int mode = I("bgmode"); bool nobg = B("bgoff");
-            g.Clear(mode > 0 || nobg ? Color.Black : C("bg"));
-            if (!nobg && mode == 0 && I("grad") > 0)
+            using (Bitmap bmp = new Bitmap(Width, Height, PixelFormat.Format32bppPArgb))
+            using (Graphics g = Graphics.FromImage(bmp))
             {
-                int gr = I("grad"); float ang = gr == 1 ? 90f : (gr == 2 ? 0f : 45f);
-                using (LinearGradientBrush gb = new LinearGradientBrush(new Rectangle(0, 0, Width + 1, Height + 1), C("bg"), C("bg2"), ang)) g.FillRectangle(gb, 0, 0, Width + 1, Height + 1);
+                g.SmoothingMode = SmoothingMode.AntiAlias; g.PixelOffsetMode = PixelOffsetMode.HighQuality; g.CompositingQuality = CompositingQuality.HighQuality;
+                g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit; g.Clear(Color.Transparent);
+                using (GraphicsPath path = Shapes.Make(I("shape"), I("radius"), new RectangleF(0, 0, Width, Height)))
+                {
+                    if (!nobg)
+                    {
+                        if (mode == 0 && I("grad") > 0)
+                        {
+                            int gr = I("grad"); float ang = gr == 1 ? 90f : (gr == 2 ? 0f : 45f);
+                            using (LinearGradientBrush gb = new LinearGradientBrush(new Rectangle(0, 0, Width + 1, Height + 1), C("bg"), C("bg2"), ang)) g.FillPath(gb, path);
+                        }
+                        else using (SolidBrush sb = new SolidBrush(mode == 0 ? C("bg") : Color.FromArgb(I("bgalpha"), C("bg")))) g.FillPath(sb, path);
+                    }
+                    int bw = I("borderw");
+                    if (bw > 0)
+                    {
+                        float hw = bw / 2f;
+                        using (GraphicsPath bp = Shapes.Make(I("shape"), I("radius"), new RectangleF(hw, hw, Width - bw, Height - bw)))
+                        using (Pen pen = new Pen(C("borderc"), bw)) { pen.LineJoin = LineJoin.Round; g.DrawPath(pen, bp); }
+                    }
+                    g.SetClip(path);
+                }
+                PaintContent(g);
+                Native.Present(this, bmp, (byte)(mode == 0 ? Math.Max(15, Math.Min(100, I("opacity"))) * 255 / 100 : 255));
             }
-            if (nobg && mode == 0) { /* solid black with no bg: make fully transparent via TransparencyKey not used; keep dark */ }
-            int bw = I("borderw");
-            if (bw > 0)
-            {
-                float hw = bw / 2f;
-                using (GraphicsPath bp = Shapes.Make(I("shape"), I("radius"), new RectangleF(hw, hw, Width - bw, Height - bw)))
-                using (Pen pen = new Pen(C("borderc"), bw)) { pen.LineJoin = LineJoin.Round; g.DrawPath(pen, bp); }
-            }
+        }
+        void PaintContent(Graphics g)
+        {
             int pad = I("pad"); float W = Width - 2 * pad, H = Height - 2 * pad;
             if (W < 10 || H < 10) return;
             DateTime n = Now(S("tz"));
