@@ -1420,7 +1420,7 @@ namespace ClockStudio
                 SaveIds(l);
             }
             if (!Settings.GetBool("autostart_init", false)) { SetAutostart(true); Settings.Set("autostart_init", true); Settings.Save(); }
-            else if (IsAutostart()) SetAutostart(true);
+            else { AutoDiag(); if (IsAutostart()) SetAutostart(true); }
             foreach (string id in Ids()) Spawn(id, 0, true);
             tray = new NotifyIcon(); tray.Icon = SystemIcons.Application; tray.Text = "Clock Studio"; tray.Visible = true; RefreshTray();
             tray.MouseClick += delegate (object so, MouseEventArgs me)
@@ -1451,7 +1451,27 @@ namespace ClockStudio
         }
         const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
         public static bool IsAutostart() { try { using (RegistryKey k = Registry.CurrentUser.OpenSubKey(RunKey)) return k != null && k.GetValue("ClockStudio") != null; } catch { return false; } }
-        public static void SetAutostart(bool on)
+                static void Approve()
+        {
+            try { using (RegistryKey k = Registry.CurrentUser.CreateSubKey(@"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run")) k.SetValue("ClockStudio", new byte[] { 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }, RegistryValueKind.Binary); } catch { }
+        }
+        public static void AutoDiag()
+        {
+            try
+            {
+                string dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "ClockStudio"); Directory.CreateDirectory(dir);
+                object run = null, ap = null;
+                using (RegistryKey k = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run")) { if (k != null) run = k.GetValue("ClockStudio"); }
+                using (RegistryKey k = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run")) { if (k != null) ap = k.GetValue("ClockStudio"); }
+                byte[] b = ap as byte[]; string st = b == null ? "none" : BitConverter.ToString(b);
+                string line = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + "  started; uptime " + ((uint)Environment.TickCount / 60000) + " min; exe=" + Application.ExecutablePath + "; Run=" + (run == null ? "missing" : "present") + "; StartupApproved=" + st + (b != null && b.Length > 0 && (b[0] & 1) == 1 ? " (DISABLED by Windows)" : "") + "\r\n";
+                string f = Path.Combine(dir, "startup.log"); try { if (File.Exists(f) && new FileInfo(f).Length > 50000) File.Delete(f); } catch { }
+                File.AppendAllText(f, line);
+            }
+            catch { }
+        }
+        public static void SetAutostart(bool on) { SetAutostartRaw(on); if (on) Approve(); }
+        static void SetAutostartRaw(bool on)
         {
             try { using (RegistryKey k = Registry.CurrentUser.OpenSubKey(RunKey, true)) { if (on) k.SetValue("ClockStudio", "\"" + Application.ExecutablePath + "\""); else k.DeleteValue("ClockStudio", false); } } catch { }
         }
