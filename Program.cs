@@ -1335,6 +1335,17 @@ namespace ClockStudio
     {
         public static List<ClockForm> Clocks_ = new List<ClockForm>();
         static NotifyIcon tray;
+        class TrayGuard : NativeWindow
+        {
+            static int msg;
+            [DllImport("user32.dll", CharSet = CharSet.Auto)] static extern int RegisterWindowMessage(string s);
+            public static void Install() { msg = RegisterWindowMessage("TaskbarCreated"); new TrayGuard().CreateHandle(new CreateParams()); }
+            protected override void WndProc(ref Message m)
+            {
+                if (m.Msg == msg && tray != null) { try { tray.Visible = false; tray.Visible = true; RefreshTray(); } catch { } }
+                base.WndProc(ref m);
+            }
+        }
         static List<string> Ids() { return new List<string>(Settings.Get("ids", "").Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries)); }
         static void SaveIds(List<string> l) { Settings.Set("ids", string.Join(",", l.ToArray())); Settings.Save(); }
         static List<string> Deleted() { return new List<string>(Settings.Get("deleted", "").Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries)); }
@@ -1423,6 +1434,7 @@ namespace ClockStudio
             else { AutoDiag(); if (IsAutostart()) SetAutostart(true); }
             foreach (string id in Ids()) Spawn(id, 0, true);
             tray = new NotifyIcon(); tray.Icon = SystemIcons.Application; tray.Text = "Clock Studio"; tray.Visible = true; RefreshTray();
+            try { TrayGuard.Install(); } catch { }
             tray.MouseClick += delegate (object so, MouseEventArgs me)
             {
                 if (me.Button == MouseButtons.Left)
